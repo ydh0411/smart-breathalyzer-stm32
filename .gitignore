@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+.AppleDouble
+
+# LaTeX auxiliary
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Mbed build artifacts
+BUILD/
+mbed-os/
+.bld/
+*.bin
+*.elf
+*.hex
+
+# IDE / editor
+.vscode/
+.idea/
+.claude/
+__pycache__/
+*.pyc
+
+# Large reference files (not source code)
+MS报销指南.pdf
+Components*
+MS-Project_Proposal_Form.docx
+*学长的*.pdf
+Project_ZhouShengye*.pdf
