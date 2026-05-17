@@ -20,6 +20,7 @@ constexpr bool LED_ACTIVE_LOW = false;
 constexpr bool BUZZER_ACTIVE_LOW = false;
 constexpr bool RUN_OUTPUT_SELF_TEST = true;
 constexpr bool ENABLE_BLE_TELEMETRY = true;
+constexpr bool DATA_LOGGING = false;
 
 constexpr int ADC_MAX_VALUE = 4095;
 constexpr auto SAMPLE_PERIOD = 100ms;

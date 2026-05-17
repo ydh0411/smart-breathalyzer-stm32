@@ -37,7 +37,7 @@ int main() {
     Ssd1306 oled(PIN_I2C_SDA, PIN_I2C_SCL);
     const bool oled_ok = oled.init();
 
-    printf("Smart Breathalyzer booting...\r\n");
+    printf("# time_ms,raw_adc,filtered_adc,state,baseline,warning_th,danger_th\r\n");
     if (!oled_ok) {
         printf("OLED init failed. Please check wiring and I2C address.\r\n");
     }
@@ -55,6 +55,7 @@ int main() {
     int level_percent = 0, baseline_sum = 0, baseline_count = 0;
     int trigger_counter = 0, release_counter = 0, sleep_wake_counter = 0;
     int sensor_rail_counter = 0, sensor_recover_counter = 0;
+    int cooldown_ref_adc = 0;
     char ble_command[32] = {};
     size_t ble_command_len = 0;
 
@@ -200,6 +201,13 @@ int main() {
             filtered_adc = filter.value();
 
             const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(uptime.elapsed_time()).count();
+
+            if (DATA_LOGGING) {
+                printf("DATA,%lld,%d,%d,%s,%d,%d,%d\r\n",
+                       elapsed_ms, raw_adc, filtered_adc, state_name(state),
+                       baseline_adc, warning_threshold_adc, danger_threshold_adc);
+            }
+
             const bool sensor_rail_fault = (raw_adc <= SENSOR_FAULT_LOW_ADC || raw_adc >= SENSOR_FAULT_HIGH_ADC);
 
             if (state != SystemState::SensorFault) {
@@ -303,6 +311,7 @@ int main() {
                             if (release_counter >= DANGER_RELEASE_COUNT) {
                                 state = SystemState::Cooldown;
                                 cooldown_start = now;
+                                cooldown_ref_adc = filtered_adc;
                                 reset_counters();
                                 printf("STATE => COOLDOWN, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
                             }
@@ -311,9 +320,15 @@ int main() {
                         }
                     } else if (state == SystemState::Cooldown) {
                         if ((now - cooldown_start) >= COOLDOWN_TIME) {
-                            if (filtered_adc >= danger_threshold_adc)      { state = SystemState::Danger;  printf("STATE => DANGER, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
-                            else if (filtered_adc >= warning_threshold_adc) { state = SystemState::Warning; printf("STATE => WARNING, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
-                            else                                           { state = SystemState::Safe;    safe_idle_start = now; printf("STATE => SAFE, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                            if (filtered_adc <= warning_release_threshold) {
+                                state = SystemState::Safe;
+                                safe_idle_start = now;
+                                printf("STATE => SAFE, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
+                            } else if (filtered_adc > cooldown_ref_adc) {
+                                if (filtered_adc >= danger_threshold_adc)      { state = SystemState::Danger;  printf("STATE => DANGER, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                                else if (filtered_adc >= warning_threshold_adc) { state = SystemState::Warning; printf("STATE => WARNING, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                                else                                           { state = SystemState::Safe;    safe_idle_start = now; printf("STATE => SAFE, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                            }
                         }
                     }
                 }

@@ -32,3 +32,23 @@ Components*
 MS-Project_Proposal_Form.docx
 *学长的*.pdf
 Project_ZhouShengye*.pdf
+
+# Report, figures, and data (not engineering code)
+MS_individual_project_report_template.*
+MS individual project report_template.*
+report/
+report_assets/
+figures/
+data/
+
+# Photos
+IMG_*.JPG
+IMG_*.jpg
+
+# Temp files
+_temp_cover/
+
+# Docs with personal info
+report_requirements_and_video_guide.md
+projectmd.md
+README_mbed_code.md
