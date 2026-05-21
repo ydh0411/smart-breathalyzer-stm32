@@ -49,6 +49,9 @@ constexpr int SENSOR_FAULT_HIGH_ADC = ADC_MAX_VALUE - 10;
 constexpr int SENSOR_FAULT_RAIL_COUNT = 20;
 constexpr int SENSOR_FAULT_RECOVER_COUNT = 20;
 
+constexpr int EVENT_LOG_SIZE = 32;
+constexpr auto EVENT_LOG_SNAPSHOT_PERIOD = 30s;
+
 } // namespace
 
 #endif

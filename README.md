@@ -101,6 +101,7 @@ STATE=SAFE,RAW=912,AVG=908,BASE=900,W=1150,D=2400,LVL=3
 | `W` / `WAKE` | Wake from Sleep |
 | `T` / `STAT` | Request immediate status frame |
 | `H` / `HELP` | List available commands |
+| `L` / `LOG` | Dump session event log book |
 
 Commands are buffered and processed after a 60 ms idle gap.
 
@@ -118,8 +119,32 @@ Commands are buffered and processed after a 60 ms idle gap.
 | `DANGER_HYSTERESIS` | 200 | Release hysteresis for Danger → Cooldown |
 | `COOLDOWN_TIME` | 10 s | Minimum cooldown before state re-evaluation |
 | `AUTO_SLEEP_AFTER` | 5 min | Idle time before auto-sleep |
+| `EVENT_LOG_SIZE` | 32 | Circular buffer capacity for event log book |
+| `EVENT_LOG_SNAPSHOT_PERIOD` | 30 s | Periodic log entries during Warning/Danger |
 | `ENABLE_BLE_TELEMETRY` | true | Enable/disable BLE status frames |
 | `DATA_LOGGING` | false | Enable CSV serial data logging |
+
+### Event Log Book
+
+Every state transition is recorded into a 32-entry circular buffer with a timestamp, state name, filtered ADC value, and level percentage. During Warning and Danger states, a snapshot is also logged every 30 seconds to provide temporal context.
+
+Send `L` or `LOG` via BLE to retrieve the session's event log. Example output:
+
+```
+--- LOG BOOK (9/32 entries) ---
+[  30.0 s] SAFE     ADC= 890  LVL=  0%
+[  32.1 s] WARNING  ADC=1165  LVL= 22%
+[  59.2 s] DANGER   ADC=2432  LVL= 89%
+[  62.1 s] DANGER   ADC=2410  LVL= 88%
+[  76.6 s] COOLDOWN ADC=1965  LVL= 62%
+[  86.7 s] WARNING  ADC=1820  LVL= 68%
+[  92.1 s] WARNING  ADC=1750  LVL= 64%
+[  99.7 s] SAFE     ADC= 907  LVL=  0%
+[ 202.2 s] SAFE     ADC= 910  LVL=  0%
+--- END LOG ---
+```
+
+This turns the BLE link from a passive data stream into an active, queryable session record — useful for reviewing exposure history without needing a companion app.
 
 ---
 
@@ -153,14 +178,19 @@ mbed-tools compile -m NUCLEO_L432KC -t GCC_ARM --flash
 
 ```
 Smart Breathalyzer booting...
-BLE CMD: W/WAKE, S/SLEEP, C/CAL, T/STAT, H/HELP
+BLE CMD: W/WAKE, S/SLEEP, C/CAL, T/STAT, L/LOG, H/HELP
 Output self-test start...
 Output self-test end.
 Calibration done. baseline=908 warning=1158 danger=2408
+LOG,30000,SAFE,908,0%
 STATE => SAFE, raw=912 avg=908
+LOG,32100,WARNING,1165,22%
 STATE => WARNING, raw=1180 avg=1165
+LOG,59200,DANGER,2432,89%
 STATE => DANGER, raw=2450 avg=2432
+LOG,76600,COOLDOWN,1965,62%
 STATE => COOLDOWN, raw=1980 avg=1965
+LOG,99700,SAFE,907,0%
 STATE => SAFE, raw=910 avg=907
 ```
 

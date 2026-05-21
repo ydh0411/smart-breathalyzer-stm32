@@ -41,7 +41,7 @@ int main() {
     if (!oled_ok) {
         printf("OLED init failed. Please check wiring and I2C address.\r\n");
     }
-    printf("BLE CMD: W/WAKE, S/SLEEP, C/CAL, T/STAT, H/HELP\r\n");
+    printf("BLE CMD: W/WAKE, S/SLEEP, C/CAL, T/STAT, L/LOG, H/HELP\r\n");
 
     MovingTrimmedAverage filter;
     Timer uptime;
@@ -59,9 +59,33 @@ int main() {
     char ble_command[32] = {};
     size_t ble_command_len = 0;
 
+    // --- Event log book (circular buffer) ---
+    struct EventLogEntry {
+        int64_t timestamp_ms;
+        SystemState state;
+        int filtered_adc;
+        int level_percent;
+    };
+    EventLogEntry event_log[EVENT_LOG_SIZE] = {};
+    size_t event_log_write = 0;
+    size_t event_log_count = 0;
+
+    auto log_event = [&](const SystemState st) {
+        const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(uptime.elapsed_time()).count();
+        const size_t idx = event_log_write % EVENT_LOG_SIZE;
+        event_log[idx].timestamp_ms = ts;
+        event_log[idx].state = st;
+        event_log[idx].filtered_adc = filtered_adc;
+        event_log[idx].level_percent = level_percent;
+        event_log_write = (event_log_write + 1) % EVENT_LOG_SIZE;
+        if (event_log_count < EVENT_LOG_SIZE) ++event_log_count;
+        printf("LOG,%lld,%s,%d,%d%%\r\n", ts, state_name(st), filtered_adc, level_percent);
+    };
+
     auto next_sample = Kernel::Clock::now();
     auto next_display = Kernel::Clock::now();
     auto next_ble = Kernel::Clock::now();
+    auto next_event_snapshot = Kernel::Clock::now();
     auto preheat_start = Kernel::Clock::now();
     auto cooldown_start = Kernel::Clock::now();
     auto safe_idle_start = Kernel::Clock::now();
@@ -99,6 +123,7 @@ int main() {
         state = SystemState::Sleep;
         reset_counters();
         safe_idle_start = now;
+        log_event(state);
     };
 
     auto send_status = [&](const auto &now) {
@@ -123,7 +148,7 @@ int main() {
         }
 
         if (std::strcmp(command, "H") == 0 || std::strcmp(command, "HELP") == 0) {
-            ble_send_text("CMDS: W/WAKE,S/SLEEP,C/CAL,T/STAT,H/HELP\r\n");
+            ble_send_text("CMDS: W/WAKE,S/SLEEP,C/CAL,T/STAT,L/LOG,H/HELP\r\n");
             return;
         }
 
@@ -144,6 +169,7 @@ int main() {
                 state = SystemState::Safe;
                 reset_counters();
                 safe_idle_start = current_now;
+                log_event(state);
                 ble_send_text("ACK WAKE\r\n");
                 printf("CMD => WAKE\r\n");
             } else {
@@ -154,8 +180,30 @@ int main() {
 
         if (std::strcmp(command, "C") == 0 || std::strcmp(command, "CAL") == 0 || std::strcmp(command, "RECAL") == 0) {
             reset_to_preheating(current_now);
+            log_event(SystemState::Preheating);
             ble_send_text("ACK CAL\r\n");
             printf("CMD => CAL\r\n");
+            return;
+        }
+
+        if (std::strcmp(command, "L") == 0 || std::strcmp(command, "LOG") == 0) {
+            char header[64];
+            const size_t entries = event_log_count;
+            std::snprintf(header, sizeof(header), "--- LOG BOOK (%zu/%d entries) ---\r\n", entries, EVENT_LOG_SIZE);
+            ble_send_text(header);
+            for (size_t i = 0; i < entries; ++i) {
+                const size_t idx = (entries < EVENT_LOG_SIZE)
+                    ? i
+                    : (event_log_write + i) % EVENT_LOG_SIZE;
+                const auto &e = event_log[idx];
+                char line[100];
+                std::snprintf(line, sizeof(line),
+                    "[%5lld.%01lld s] %-7s  ADC=%4d  LVL=%3d%%\r\n",
+                    e.timestamp_ms / 1000, (e.timestamp_ms / 100) % 10,
+                    state_name(e.state), e.filtered_adc, e.level_percent);
+                ble_send_text(line);
+            }
+            ble_send_text("--- END LOG ---\r\n");
             return;
         }
 
@@ -216,6 +264,7 @@ int main() {
                     state = SystemState::SensorFault;
                     reset_counters();
                     sensor_recover_counter = 0;
+                    log_event(state);
                     printf("STATE => FAULT, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
                 }
             } else {
@@ -226,6 +275,7 @@ int main() {
                     baseline_sum = baseline_count = level_percent = 0;
                     reset_counters();
                     sensor_rail_counter = sensor_recover_counter = 0;
+                    log_event(state);
                     printf("FAULT cleared. Restart preheating.\r\n");
                 }
             }
@@ -243,6 +293,7 @@ int main() {
                         reset_counters();
                         safe_idle_start = now;
                         level_percent = 0;
+                        log_event(state);
                         printf("Calibration done. baseline=%d warning=%d danger=%d\r\n", baseline_adc, warning_threshold_adc, danger_threshold_adc);
                     }
                 } else {
@@ -259,9 +310,9 @@ int main() {
                             if (sleep_wake_counter >= SLEEP_WAKE_COUNT) {
                                 sleep_wake_counter = 0;
                                 safe_idle_start = now;
-                                if (filtered_adc >= danger_threshold_adc)      { state = SystemState::Danger;  printf("STATE => DANGER, wake raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
-                                else if (filtered_adc >= warning_threshold_adc) { state = SystemState::Warning; printf("STATE => WARNING, wake raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
-                                else                                           { state = SystemState::Safe;    printf("STATE => SAFE, wake raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                                if (filtered_adc >= danger_threshold_adc)      { state = SystemState::Danger;  log_event(state); printf("STATE => DANGER, wake raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                                else if (filtered_adc >= warning_threshold_adc) { state = SystemState::Warning; log_event(state); printf("STATE => WARNING, wake raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                                else                                           { state = SystemState::Safe;    log_event(state); printf("STATE => SAFE, wake raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
                             }
                         } else {
                             sleep_wake_counter = 0;
@@ -272,6 +323,7 @@ int main() {
                             if (trigger_counter >= WARNING_ENTER_COUNT) {
                                 state = SystemState::Warning;
                                 reset_counters();
+                                log_event(state);
                                 printf("STATE => WARNING, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
                             }
                         } else {
@@ -279,6 +331,7 @@ int main() {
                             if (filtered_adc < sleep_wake_threshold && (now - safe_idle_start) >= AUTO_SLEEP_AFTER) {
                                 state = SystemState::Sleep;
                                 reset_counters();
+                                log_event(state);
                                 printf("STATE => SLEEP, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
                             } else if (filtered_adc >= sleep_wake_threshold) {
                                 safe_idle_start = now;
@@ -291,6 +344,7 @@ int main() {
                             if (trigger_counter >= DANGER_ENTER_COUNT) {
                                 state = SystemState::Danger;
                                 reset_counters();
+                                log_event(state);
                                 printf("STATE => DANGER, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
                             }
                         } else if (filtered_adc < warning_release_threshold) {
@@ -300,6 +354,7 @@ int main() {
                                 state = SystemState::Safe;
                                 reset_counters();
                                 safe_idle_start = now;
+                                log_event(state);
                                 printf("STATE => SAFE, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
                             }
                         } else {
@@ -313,6 +368,7 @@ int main() {
                                 cooldown_start = now;
                                 cooldown_ref_adc = filtered_adc;
                                 reset_counters();
+                                log_event(state);
                                 printf("STATE => COOLDOWN, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
                             }
                         } else {
@@ -323,11 +379,12 @@ int main() {
                             if (filtered_adc <= warning_release_threshold) {
                                 state = SystemState::Safe;
                                 safe_idle_start = now;
+                                log_event(state);
                                 printf("STATE => SAFE, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
                             } else if (filtered_adc > cooldown_ref_adc) {
-                                if (filtered_adc >= danger_threshold_adc)      { state = SystemState::Danger;  printf("STATE => DANGER, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
-                                else if (filtered_adc >= warning_threshold_adc) { state = SystemState::Warning; printf("STATE => WARNING, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
-                                else                                           { state = SystemState::Safe;    safe_idle_start = now; printf("STATE => SAFE, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                                if (filtered_adc >= danger_threshold_adc)      { state = SystemState::Danger;  log_event(state); printf("STATE => DANGER, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                                else if (filtered_adc >= warning_threshold_adc) { state = SystemState::Warning; log_event(state); printf("STATE => WARNING, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
+                                else                                           { state = SystemState::Safe;    log_event(state); safe_idle_start = now; printf("STATE => SAFE, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
                             }
                         }
                     }
@@ -356,6 +413,15 @@ int main() {
             next_ble += BLE_TELEMETRY_PERIOD;
             send_ble_telemetry(ble_uart, state, raw_adc, filtered_adc, baseline_adc, warning_threshold_adc,
                                danger_threshold_adc, level_percent);
+        }
+
+        if (state == SystemState::Warning || state == SystemState::Danger) {
+            if (now >= next_event_snapshot) {
+                next_event_snapshot += EVENT_LOG_SNAPSHOT_PERIOD;
+                log_event(state);
+            }
+        } else {
+            next_event_snapshot = now;
         }
 
         ThisThread::sleep_for(20ms);
