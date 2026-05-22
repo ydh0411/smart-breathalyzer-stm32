@@ -191,6 +191,7 @@ int main() {
             const size_t entries = event_log_count;
             std::snprintf(header, sizeof(header), "--- LOG BOOK (%zu/%d entries) ---\r\n", entries, EVENT_LOG_SIZE);
             ble_send_text(header);
+            printf("%s", header);
             for (size_t i = 0; i < entries; ++i) {
                 const size_t idx = (entries < EVENT_LOG_SIZE)
                     ? i
@@ -202,8 +203,10 @@ int main() {
                     e.timestamp_ms / 1000, (e.timestamp_ms / 100) % 10,
                     state_name(e.state), e.filtered_adc, e.level_percent);
                 ble_send_text(line);
+                printf("%s", line);
             }
             ble_send_text("--- END LOG ---\r\n");
+            printf("--- END LOG ---\r\n");
             return;
         }
 
