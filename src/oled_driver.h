@@ -1,3 +1,4 @@
+// Handwritten SSD1306 OLED driver over I2C — 128x64, framebuffer, 5x8 font
 #ifndef OLED_DRIVER_H
 #define OLED_DRIVER_H
 
@@ -6,11 +7,9 @@
 #include <cctype>
 #include <cstdint>
 
-namespace {
-
-constexpr int OLED_ADDR_8BIT = 0x78;
-constexpr int OLED_WIDTH = 128;
-constexpr int OLED_HEIGHT = 64;
+constexpr int OLED_ADDR_8BIT   = 0x78;
+constexpr int OLED_WIDTH       = 128;
+constexpr int OLED_HEIGHT      = 64;
 constexpr int OLED_BUFFER_SIZE = (OLED_WIDTH * OLED_HEIGHT) / 8;
 
 int clamp_int(const int value, const int lo, const int hi) {
@@ -21,12 +20,11 @@ int clamp_int(const int value, const int lo, const int hi) {
 
 const uint8_t *glyph_for(char c);
 
-} // namespace
-
 class Ssd1306 {
 public:
     Ssd1306(PinName sda, PinName scl) : i2c_(sda, scl) {}
 
+    // ---- Initialisation ----
     bool init() {
         i2c_.frequency(400000);
 
@@ -44,6 +42,7 @@ public:
         return flush();
     }
 
+    // ---- Framebuffer operations ----
     void clear() { framebuffer_.fill(0); }
 
     bool flush() {
@@ -68,6 +67,7 @@ public:
         return true;
     }
 
+    // ---- Drawing primitives ----
     void draw_text(int x, int y, const char *text) {
         if (text == nullptr) return;
         while (*text != '\0' && x <= (OLED_WIDTH - 6)) {
@@ -81,10 +81,11 @@ public:
         percent = clamp_int(percent, 0, 100);
         if (width < 4 || height < 4) return;
 
-        const int inner_width = width - 2;
+        const int inner_width  = width - 2;
         const int inner_height = height - 2;
         const int filled_width = (inner_width * percent) / 100;
 
+        // Border
         for (int dx = 0; dx < width; ++dx) {
             draw_pixel(x + dx, y, true);
             draw_pixel(x + dx, y + height - 1, true);
@@ -93,6 +94,7 @@ public:
             draw_pixel(x, y + dy, true);
             draw_pixel(x + width - 1, y + dy, true);
         }
+        // Fill
         for (int dx = 0; dx < filled_width; ++dx)
             for (int dy = 0; dy < inner_height; ++dy)
                 draw_pixel(x + 1 + dx, y + 1 + dy, true);
@@ -115,10 +117,10 @@ private:
         const uint8_t *glyph = glyph_for(c);
         for (int col = 0; col < 5; ++col) {
             const uint8_t bits = glyph[col];
-            for (int row = 0; row < 8; ++row) {
+            for (int row = 0; row < 8; ++row)
                 draw_pixel(x + col, y + row, (bits & (1U << row)) != 0);
-            }
         }
+        // Inter-character spacing column
         for (int row = 0; row < 8; ++row)
             draw_pixel(x + 5, y + row, false);
     }
@@ -126,7 +128,7 @@ private:
     void draw_pixel(const int x, const int y, const bool on) {
         if (x < 0 || x >= OLED_WIDTH || y < 0 || y >= OLED_HEIGHT) return;
         const int page = y / 8;
-        const int bit = y % 8;
+        const int bit  = y % 8;
         const size_t index = static_cast<size_t>(page * OLED_WIDTH + x);
         const uint8_t mask = static_cast<uint8_t>(1U << bit);
         if (on)
@@ -139,9 +141,7 @@ private:
     std::array<uint8_t, OLED_BUFFER_SIZE> framebuffer_{};
 };
 
-// --- 5x8 font glyphs (A-Z, 0-9, symbols) ---
-
-namespace {
+// ---- 5x8 bitmap font (A-Z, 0-9, symbols) ----
 
 const uint8_t *glyph_for(char c) {
     static const uint8_t blank[5]     = {0x00, 0x00, 0x00, 0x00, 0x00};
@@ -237,7 +237,5 @@ const uint8_t *glyph_for(char c) {
     default: return blank;
     }
 }
-
-} // namespace
 
 #endif

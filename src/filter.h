@@ -1,3 +1,4 @@
+// Moving-average filter that trims min/max samples to reject outliers
 #ifndef FILTER_H
 #define FILTER_H
 

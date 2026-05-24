@@ -4,19 +4,19 @@
 #include "filter.h"
 #include "outputs.h"
 #include "display.h"
+#include "ble_handler.h"
 
-#include <cctype>
 #include <cstdio>
-#include <cstring>
 
 int main() {
+    // ---- Hardware initialisation ----
     AnalogIn mq3_ao(PIN_MQ3_AO);
     DigitalOut led_green(PIN_LED_GREEN, 0);
     DigitalOut led_red(PIN_LED_RED, 0);
     DigitalOut buzzer(PIN_BUZZER, 0);
-    BufferedSerial ble_uart(PIN_BLE_TX, PIN_BLE_RX, 9600);
-    ble_uart.set_blocking(false);
+    BleHandler ble(PIN_BLE_TX, PIN_BLE_RX);
 
+    // ---- Output self-test on startup ----
     if (RUN_OUTPUT_SELF_TEST) {
         printf("Output self-test start...\r\n");
         auto test_step = [&](bool g, bool r, bool b, auto t) {
@@ -33,7 +33,7 @@ int main() {
         write_channel(buzzer, false, BUZZER_ACTIVE_LOW);
         printf("Output self-test end.\r\n");
     }
-
+    // ---- OLED init ----
     Ssd1306 oled(PIN_I2C_SDA, PIN_I2C_SCL);
     const bool oled_ok = oled.init();
 
@@ -42,7 +42,7 @@ int main() {
         printf("OLED init failed. Please check wiring and I2C address.\r\n");
     }
     printf("BLE CMD: W/WAKE, S/SLEEP, C/CAL, T/STAT, L/LOG, H/HELP\r\n");
-
+    // ---- State variables & filter ----
     MovingTrimmedAverage filter;
     Timer uptime;
     uptime.start();
@@ -53,11 +53,10 @@ int main() {
     int warning_threshold_adc = WARNING_THRESHOLD_MIN;
     int danger_threshold_adc = WARNING_THRESHOLD_MIN + 120;
     int level_percent = 0, baseline_sum = 0, baseline_count = 0;
+    // Debounce counters for state transitions
     int trigger_counter = 0, release_counter = 0, sleep_wake_counter = 0;
     int sensor_rail_counter = 0, sensor_recover_counter = 0;
     int cooldown_ref_adc = 0;
-    char ble_command[32] = {};
-    size_t ble_command_len = 0;
 
     // --- Event log book (circular buffer) ---
     struct EventLogEntry {
@@ -81,7 +80,7 @@ int main() {
         if (event_log_count < EVENT_LOG_SIZE) ++event_log_count;
         printf("LOG,%lld,%s,%d,%d%%\r\n", ts, state_name(st), filtered_adc, level_percent);
     };
-
+    // ---- Scheduler time points ----
     auto next_sample = Kernel::Clock::now();
     auto next_display = Kernel::Clock::now();
     auto next_ble = Kernel::Clock::now();
@@ -89,24 +88,7 @@ int main() {
     auto preheat_start = Kernel::Clock::now();
     auto cooldown_start = Kernel::Clock::now();
     auto safe_idle_start = Kernel::Clock::now();
-    auto ble_rx_last = Kernel::Clock::now();
-
-    auto ble_send_text = [&](const char *text) {
-        if (text == nullptr) {
-            return;
-        }
-
-        size_t remaining = std::strlen(text);
-        while (remaining > 0) {
-            const ssize_t written = ble_uart.write(text, remaining);
-            if (written <= 0) {
-                break;
-            }
-            text += written;
-            remaining -= static_cast<size_t>(written);
-        }
-    };
-
+    // ---- State-transition helpers ----
     auto reset_counters = [&]() {
         trigger_counter = release_counter = sleep_wake_counter = 0;
     };
@@ -139,109 +121,73 @@ int main() {
             "STATUS=%s,RAW=%d,AVG=%d,BASE=%d,W=%d,D=%d,LVL=%d,SLEEP=%d,PRE=%d,COOL=%d\r\n",
             state_name(state), raw_adc, filtered_adc, baseline_adc, warning_threshold_adc,
             danger_threshold_adc, level_percent, state == SystemState::Sleep ? 1 : 0, pre, cool);
-        ble_send_text(line);
+        ble.send_text(line);
     };
 
+    // ---- BLE command handler ----
     auto process_ble_command = [&](const char *command, const auto &current_now) {
-        if (command == nullptr || command[0] == '\0') {
-            return;
-        }
+        if (command == nullptr || command[0] == '\0') return;
 
         if (std::strcmp(command, "H") == 0 || std::strcmp(command, "HELP") == 0) {
-            ble_send_text("CMDS: W/WAKE,S/SLEEP,C/CAL,T/STAT,L/LOG,H/HELP\r\n");
+            ble.send_help();
             return;
         }
-
         if (std::strcmp(command, "T") == 0 || std::strcmp(command, "STAT") == 0) {
             send_status(current_now);
             return;
         }
-
         if (std::strcmp(command, "S") == 0 || std::strcmp(command, "SLEEP") == 0) {
             enter_sleep(current_now);
-            ble_send_text("ACK SLEEP\r\n");
+            ble.send_ack("SLEEP");
             printf("CMD => SLEEP\r\n");
             return;
         }
-
         if (std::strcmp(command, "W") == 0 || std::strcmp(command, "WAKE") == 0) {
             if (state == SystemState::Sleep) {
                 state = SystemState::Safe;
                 reset_counters();
                 safe_idle_start = current_now;
                 log_event(state);
-                ble_send_text("ACK WAKE\r\n");
+                ble.send_ack("WAKE");
                 printf("CMD => WAKE\r\n");
             } else {
-                ble_send_text("ACK WAKE (NOOP)\r\n");
+                ble.send_ack("WAKE (NOOP)");
             }
             return;
         }
-
         if (std::strcmp(command, "C") == 0 || std::strcmp(command, "CAL") == 0 || std::strcmp(command, "RECAL") == 0) {
             reset_to_preheating(current_now);
             log_event(SystemState::Preheating);
-            ble_send_text("ACK CAL\r\n");
+            ble.send_ack("CAL");
             printf("CMD => CAL\r\n");
             return;
         }
-
         if (std::strcmp(command, "L") == 0 || std::strcmp(command, "LOG") == 0) {
-            char header[64];
-            const size_t entries = event_log_count;
-            std::snprintf(header, sizeof(header), "--- LOG BOOK (%zu/%d entries) ---\r\n", entries, EVENT_LOG_SIZE);
-            ble_send_text(header);
-            printf("%s", header);
-            for (size_t i = 0; i < entries; ++i) {
-                const size_t idx = (entries < EVENT_LOG_SIZE)
+            ble.send_log_header(event_log_count, EVENT_LOG_SIZE);
+            for (size_t i = 0; i < event_log_count; ++i) {
+                const size_t idx = (event_log_count < EVENT_LOG_SIZE)
                     ? i
                     : (event_log_write + i) % EVENT_LOG_SIZE;
                 const auto &e = event_log[idx];
-                char line[100];
-                std::snprintf(line, sizeof(line),
-                    "[%5lld.%01lld s] %-7s  ADC=%4d  LVL=%3d%%\r\n",
-                    e.timestamp_ms / 1000, (e.timestamp_ms / 100) % 10,
-                    state_name(e.state), e.filtered_adc, e.level_percent);
-                ble_send_text(line);
-                printf("%s", line);
+                ble.send_log_entry(e.timestamp_ms, state_name(e.state), e.filtered_adc, e.level_percent);
             }
-            ble_send_text("--- END LOG ---\r\n");
-            printf("--- END LOG ---\r\n");
+            ble.send_log_footer();
             return;
         }
-
-        ble_send_text("ERR UNKNOWN\r\n");
+        ble.send_text("ERR UNKNOWN\r\n");
     };
 
+    // ===================== Main loop =====================
     while (true) {
         const auto now = Kernel::Clock::now();
 
-        char rx = 0;
-        while (ble_uart.read(&rx, 1) == 1) {
-            const unsigned char byte = static_cast<unsigned char>(rx);
-            if (std::isalpha(byte)) {
-                if (ble_command_len < sizeof(ble_command) - 1) {
-                    ble_command[ble_command_len++] = static_cast<char>(std::toupper(byte));
-                    ble_command[ble_command_len] = '\0';
-                    ble_rx_last = now;
-                } else {
-                    ble_command_len = 0;
-                    ble_command[0] = '\0';
-                }
-            } else if (rx == '\r' || rx == '\n' || rx == ' ' || rx == '\t') {
-                // Ignore separators; the command is processed after the input stream goes idle.
-            } else {
-                ble_command_len = 0;
-                ble_command[0] = '\0';
-            }
+        // ---- BLE command polling ----
+        if (ble.poll(now)) {
+            process_ble_command(ble.command(), now);
+            ble.clear_command();
         }
 
-        if (ble_command_len > 0 && (now - ble_rx_last) >= 60ms) {
-            process_ble_command(ble_command, now);
-            ble_command_len = 0;
-            ble_command[0] = '\0';
-        }
-
+        // ---- Sensor sampling & state machine ----
         if (now >= next_sample) {
             next_sample += SAMPLE_PERIOD;
 
@@ -397,6 +343,7 @@ int main() {
             set_outputs(state, elapsed_ms, led_green, led_red, buzzer);
         }
 
+        // ---- Display update ----
         if (oled_ok && now >= next_display) {
             next_display += DISPLAY_PERIOD;
 
@@ -412,12 +359,14 @@ int main() {
                            level_percent, seconds_left, cooldown_left);
         }
 
+        // ---- BLE telemetry ----
         if (ENABLE_BLE_TELEMETRY && now >= next_ble) {
             next_ble += BLE_TELEMETRY_PERIOD;
-            send_ble_telemetry(ble_uart, state, raw_adc, filtered_adc, baseline_adc, warning_threshold_adc,
-                               danger_threshold_adc, level_percent);
+            ble.send_telemetry(state, raw_adc, filtered_adc, baseline_adc,
+                               warning_threshold_adc, danger_threshold_adc, level_percent);
         }
 
+        // ---- Periodic event log snapshot during alerts ----
         if (state == SystemState::Warning || state == SystemState::Danger) {
             if (now >= next_event_snapshot) {
                 next_event_snapshot += EVENT_LOG_SNAPSHOT_PERIOD;
