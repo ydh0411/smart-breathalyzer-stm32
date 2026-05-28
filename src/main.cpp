@@ -16,7 +16,7 @@ int main() {
     DigitalOut buzzer(PIN_BUZZER, 0);
     BleHandler ble(PIN_BLE_TX, PIN_BLE_RX);
 
-    // ---- Output self-test on startup ----
+    // ---- Output self-test on startup ----（上电自检）
     if (RUN_OUTPUT_SELF_TEST) {
         printf("Output self-test start...\r\n");
         auto test_step = [&](bool g, bool r, bool b, auto t) {
@@ -43,11 +43,12 @@ int main() {
     }
     printf("BLE CMD: W/WAKE, S/SLEEP, C/CAL, T/STAT, L/LOG, H/HELP\r\n");
     // ---- State variables & filter ----
-    MovingTrimmedAverage filter;
+    MovingTrimmedAverage filter;//滤波器
     Timer uptime;
     uptime.start();
 
     SystemState state = SystemState::Preheating;
+    SystemState last_telemetry_state = state;
 
     int raw_adc = 0, filtered_adc = 0, baseline_adc = 0;
     int warning_threshold_adc = WARNING_THRESHOLD_MIN;
@@ -59,6 +60,7 @@ int main() {
     int cooldown_ref_adc = 0;
 
     // --- Event log book (circular buffer) ---
+    //循环缓冲区32条日志
     struct EventLogEntry {
         int64_t timestamp_ms;
         SystemState state;
@@ -81,9 +83,9 @@ int main() {
         printf("LOG,%lld,%s,%d,%d%%\r\n", ts, state_name(st), filtered_adc, level_percent);
     };
     // ---- Scheduler time points ----
+    //这些时间点用于控制传感器采样、OLED刷新、事件日志记录等操作的时间间隔，确保系统按照预定的节奏运行
     auto next_sample = Kernel::Clock::now();
     auto next_display = Kernel::Clock::now();
-    auto next_ble = Kernel::Clock::now();
     auto next_event_snapshot = Kernel::Clock::now();
     auto preheat_start = Kernel::Clock::now();
     auto cooldown_start = Kernel::Clock::now();
@@ -125,7 +127,7 @@ int main() {
     };
 
     // ---- BLE command handler ----
-    auto process_ble_command = [&](const char *command, const auto &current_now) {
+    auto process_ble_command = [&](const char *command, const auto &current_now) {//根据接收到的命令字符串，执行相应的操作，如发送状态、进入睡眠、重新校准等，并通过BLE发送确认或错误消息
         if (command == nullptr || command[0] == '\0') return;
 
         if (std::strcmp(command, "H") == 0 || std::strcmp(command, "HELP") == 0) {
@@ -188,6 +190,7 @@ int main() {
         }
 
         // ---- Sensor sampling & state machine ----
+        //这部分就是通过一些if-else逻辑来实现状态机，根据当前状态和传感器读数的关系，决定是否进行状态转换，并在必要时重置计数器、记录事件日志等
         if (now >= next_sample) {
             next_sample += SAMPLE_PERIOD;
 
@@ -266,6 +269,7 @@ int main() {
                         } else {
                             sleep_wake_counter = 0;
                         }
+                        //SAFE
                     } else if (state == SystemState::Safe) {
                         if (filtered_adc >= warning_threshold_adc) {
                             ++trigger_counter;
@@ -276,6 +280,7 @@ int main() {
                                 printf("STATE => WARNING, raw=%d avg=%d\r\n", raw_adc, filtered_adc);
                             }
                         } else {
+                            //SLEEP
                             trigger_counter = 0;
                             if (filtered_adc < sleep_wake_threshold && (now - safe_idle_start) >= AUTO_SLEEP_AFTER) {
                                 state = SystemState::Sleep;
@@ -286,6 +291,7 @@ int main() {
                                 safe_idle_start = now;
                             }
                         }
+                        //WARNING
                     } else if (state == SystemState::Warning) {
                         if (filtered_adc >= danger_threshold_adc) {
                             ++trigger_counter;
@@ -308,7 +314,7 @@ int main() {
                             }
                         } else {
                             trigger_counter = release_counter = 0;
-                        }
+                        }//DANGER
                     } else if (state == SystemState::Danger) {
                         if (filtered_adc < danger_release_threshold) {
                             ++release_counter;
@@ -322,7 +328,7 @@ int main() {
                             }
                         } else {
                             release_counter = 0;
-                        }
+                        }//COOLDOWN
                     } else if (state == SystemState::Cooldown) {
                         if ((now - cooldown_start) >= COOLDOWN_TIME) {
                             if (filtered_adc <= warning_release_threshold) {
@@ -335,7 +341,9 @@ int main() {
                                 else if (filtered_adc >= warning_threshold_adc) { state = SystemState::Warning; log_event(state); printf("STATE => WARNING, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
                                 else                                           { state = SystemState::Safe;    log_event(state); safe_idle_start = now; printf("STATE => SAFE, raw=%d avg=%d\r\n", raw_adc, filtered_adc); }
                             }
-                        }
+                        }//COOLDOWN状态最复杂：在冷却状态下，一共有几种情况。1.如果冷却时间到了，且读数已经降到安全阈值以下，直接转安全；
+                        //2.如果读数回升了，则根据当前读数判断是转回危险、警告还是安全；
+                        //3.如果读数没有回升，则继续保持冷却状态，直到冷却时间结束后再进行判断。这种设计允许系统在冷却期间对环境变化做出响应，而不是完全锁死在冷却状态，提供了一定的灵活性和适应性。
                     }
                 }
             }
@@ -344,6 +352,7 @@ int main() {
         }
 
         // ---- Display update ----
+        //更新OLED显示屏的内容，显示当前状态、传感器读数、剩余时间等信息，以便用户可以直观地了解系统的运行情况和环境状态
         if (oled_ok && now >= next_display) {
             next_display += DISPLAY_PERIOD;
 
@@ -359,14 +368,16 @@ int main() {
                            level_percent, seconds_left, cooldown_left);
         }
 
-        // ---- BLE telemetry ----
-        if (ENABLE_BLE_TELEMETRY && now >= next_ble) {
-            next_ble += BLE_TELEMETRY_PERIOD;
+        // ---- BLE telemetry (state-change trigger) ----
+        //当系统状态发生变化时，如果启用了BLE遥测功能，就会通过BLE发送当前状态和相关数据，以便远程监控和记录系统的运行情况。这种设计允许用户或管理员在不直接接触设备的情况下，实时了解系统状态和环境变化，提供了便利性和灵活性。
+        if (ENABLE_BLE_TELEMETRY && state != last_telemetry_state) {
+            last_telemetry_state = state;
             ble.send_telemetry(state, raw_adc, filtered_adc, baseline_adc,
                                warning_threshold_adc, danger_threshold_adc, level_percent);
         }
 
         // ---- Periodic event log snapshot during alerts ----
+        //记录每次状态变化，为未来做好记录
         if (state == SystemState::Warning || state == SystemState::Danger) {
             if (now >= next_event_snapshot) {
                 next_event_snapshot += EVENT_LOG_SNAPSHOT_PERIOD;

@@ -46,10 +46,7 @@ def run_simulator(fd: int):
 
 
 def main():
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        print("[错误] 请先设置: export DEEPSEEK_API_KEY=sk-xxx")
-        sys.exit(1)
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or "sk-cfbf6f9bce2e4f95a13e299a411832bc"
 
     master_fd, slave_fd = pty.openpty()
     slave_name = os.ttyname(slave_fd)

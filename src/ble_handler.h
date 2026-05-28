@@ -10,11 +10,11 @@
 class BleHandler {
 public:
     BleHandler(PinName tx, PinName rx, int baud = 9600)
-        : uart_(tx, rx, baud) {
-        uart_.set_blocking(false);
+        : uart_(tx, rx, baud) {//UART 通信的初始化
+        uart_.set_blocking(false);//非阻塞模式，以便在没有数据可读时不会阻塞程序执行
     }
 
-    void send_text(const char *text) {
+    void send_text(const char *text) {//发送文本数据到蓝牙设备
         if (text == nullptr) return;
         size_t remaining = std::strlen(text);
         while (remaining > 0) {
@@ -26,7 +26,7 @@ public:
     }
 
     void send_telemetry(const SystemState state, int raw, int filtered,
-                        int baseline, int warning_th, int danger_th, int level_pct) {
+                        int baseline, int warning_th, int danger_th, int level_pct) {//发送系统状态和传感器数据的遥测信息
         char frame[128];
         const int len = std::snprintf(frame, sizeof(frame),
             "STATE=%s,RAW=%d,AVG=%d,BASE=%d,W=%d,D=%d,LVL=%d\r\n",
@@ -34,24 +34,24 @@ public:
         if (len > 0) send_text(frame);
     }
 
-    void send_help() {
+    void send_help() {//发送帮助信息，列出可用的命令，如何触发？
         send_text("CMDS: W/WAKE,S/SLEEP,C/CAL,T/STAT,L/LOG,H/HELP\r\n");
     }
 
-    void send_ack(const char *msg) {
+    void send_ack(const char *msg) {//发送命令确认消息，包含收到的命令内容
         char buf[64];
         std::snprintf(buf, sizeof(buf), "ACK %s\r\n", msg);
         send_text(buf);
     }
 
-    void send_log_header(size_t entries, int max_entries) {
+    void send_log_header(size_t entries, int max_entries) {//发送日志头信息，显示当前日志条目数和最大容量
         char header[64];
         std::snprintf(header, sizeof(header), "--- LOG BOOK (%zu/%d entries) ---\r\n", entries, max_entries);
         send_text(header);
         printf("%s", header);
     }
 
-    void send_log_entry(int64_t timestamp_ms, const char *state_str, int adc, int lvl_pct) {
+    void send_log_entry(int64_t timestamp_ms, const char *state_str, int adc, int lvl_pct) {//发送单条日志记录，包含时间戳、系统状态、ADC值和级别百分比
         char line[100];
         std::snprintf(line, sizeof(line),
             "[%5lld.%01lld s] %-8s  ADC=%4d  LVL=%3d%%\r\n",
@@ -60,7 +60,7 @@ public:
         printf("%s", line);
     }
 
-    void send_log_footer() {
+    void send_log_footer() {//发送日志结尾标志，表示日志输出完成
         send_text("--- END LOG ---\r\n");
         printf("--- END LOG ---\r\n");
     }
@@ -75,7 +75,6 @@ public:
                     cmd_buf_[cmd_len_] = '\0';
                     last_rx_ = now;
                 }
-                // else: silently ignore — buffer at capacity
             } else if (rx == '\r' || rx == '\n' || rx == ' ' || rx == '\t') {
                 // separators ignored; command boundary = 60ms idle gap
             } else {

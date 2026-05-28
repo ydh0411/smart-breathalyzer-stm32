@@ -34,7 +34,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="AI Bridge for Smart Breathalyzer")
     p.add_argument("port", nargs="?", default=None,
                    help="Serial port (e.g. /dev/tty.usbmodem*, COM3). Auto-detect if omitted.")
-    p.add_argument("--baud", type=int, default=9600, help="Serial baud rate (default: 9600)")
+    p.add_argument("--baud", type=int, default=115200, help="Serial baud rate (default: 115200)")
     p.add_argument("--model", default="deepseek-chat", help="DeepSeek model name")
     return p.parse_args()
 
@@ -54,6 +54,15 @@ def connect_serial(port: str | None, baud: int) -> serial.Serial:
             sys.exit(1)
         print(f"[自动检测] 找到设备: {port}")
     ser = serial.Serial(port, baud, timeout=0.1)
+    # Reset NUCLEO board via DTR
+    ser.dtr = False
+    time.sleep(0.1)
+    ser.dtr = True
+    time.sleep(0.1)
+    ser.dtr = False
+    time.sleep(1.5)
+    # Drain boot messages
+    ser.read(8192)
     print(f"[{timestamp()}] 设备已连接: {port} @ {baud} baud")
     return ser
 
@@ -292,10 +301,7 @@ def handle_log_analysis(client: OpenAI, model: str, log_buffer: list[dict], curr
 def main():
     args = parse_args()
 
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        print("[错误] 请设置环境变量 DEEPSEEK_API_KEY")
-        sys.exit(1)
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or "sk-cfbf6f9bce2e4f95a13e299a411832bc"
 
     ser = connect_serial(args.port, args.baud)
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
@@ -310,17 +316,10 @@ def main():
 
     try:
         while True:
-            rlist, _, _ = select.select([ser, sys.stdin], [], [])
-
-            for src in rlist:
-                if src is ser:
-                    try:
-                        data = ser.read(ser.in_waiting or 1)
-                    except Exception as e:
-                        print(f"{RED}[错误] 串口读取失败: {e}{RESET}")
-                        time.sleep(2)
-                        continue
-                    if data:
+            # Read serial (direct read avoids macOS in_waiting issues)
+            try:
+                data = ser.read(4096)
+                if data:
                         line_buf += data.decode("utf-8", errors="replace")
                         while "\n" in line_buf:
                             idx = line_buf.index("\n")
@@ -335,21 +334,29 @@ def main():
                             elif signal and current.get("state") != last_alert_state:
                                 last_alert_state = current.get("state")
                                 handle_alert(client, args.model, signal, log_buffer, current)
+                else:
+                    time.sleep(0.05)
+            except Exception as e:
+                print(f"{RED}[错误] 串口读取失败: {e}{RESET}")
+                time.sleep(2)
+                continue
 
-                elif src is sys.stdin:
-                    user_input = sys.stdin.readline()
-                    if not user_input:
-                        continue
-                    user_input = user_input.strip()
-                    if not user_input:
-                        continue
-                    if user_input.startswith("/"):
-                        if handle_local_command(user_input, log_buffer, current):
-                            return
-                    else:
-                        print(f"{GREY}┌─ AI 回复 ─────────────────────{RESET}")
-                        call_ai(client, args.model, log_buffer, current, user_input)
-                        print(f"{GREY}└────────────────────────────────{RESET}\n")
+            # Check stdin (non-blocking)
+            rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+            if rlist:
+                user_input = sys.stdin.readline()
+                if not user_input:
+                    continue
+                user_input = user_input.strip()
+                if not user_input:
+                    continue
+                if user_input.startswith("/"):
+                    if handle_local_command(user_input, log_buffer, current):
+                        return
+                else:
+                    print(f"{GREY}┌─ AI 回复 ─────────────────────{RESET}")
+                    call_ai(client, args.model, log_buffer, current, user_input)
+                    print(f"{GREY}└────────────────────────────────{RESET}\n")
 
     except KeyboardInterrupt:
         print("\n中断退出。")

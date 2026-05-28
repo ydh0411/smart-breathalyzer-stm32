@@ -61,10 +61,7 @@ def call_ai(client: OpenAI, model: str, log_buffer: list[dict], current: dict,
 
 
 def main():
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        print("[错误] 请设置 DEEPSEEK_API_KEY")
-        sys.exit(1)
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or "sk-cfbf6f9bce2e4f95a13e299a411832bc"
 
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
     model = "deepseek-chat"
