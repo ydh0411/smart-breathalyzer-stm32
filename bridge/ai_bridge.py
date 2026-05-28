@@ -62,13 +62,57 @@ def format_log_entry(e: dict) -> str:
     return f"[{e['ts_s']:6.1f}s] {e['state']:<8} ADC={e['adc']:>4}  LVL={e['level']:>3}%"
 
 
-def parse_serial_line(line: str, log_buffer: list[dict], current: dict) -> str | None:
-    """Parse one line from serial. Returns 'danger', 'warning', or None for auto-alert signal."""
+def parse_serial_line(line: str, log_buffer: list[dict], current: dict,
+                      log_dump_state: dict) -> str | None:
+    """Parse one line from serial.
+
+    Returns:
+      'danger' / 'warning' — auto-alert from STATE= transition
+      'log_dump'           — device finished dumping log book (L command response)
+      None                 — no action needed
+    """
     line = line.strip()
     if not line:
         return None
 
     alert = None
+
+    # BLE log dump: "--- LOG BOOK (5/32 entries) ---"
+    if line.startswith("--- LOG BOOK"):
+        log_dump_state["active"] = True
+        log_dump_state["buffer"] = []  # temporary buffer for this dump
+        print(f"  {YELLOW}{line}{RESET}")
+        return None
+
+    # BLE log dump: "--- END LOG ---"
+    if line.startswith("--- END LOG"):
+        log_dump_state["active"] = False
+        if log_dump_state["buffer"]:
+            log_buffer.clear()
+            log_buffer.extend(log_dump_state["buffer"])
+            log_dump_state["buffer"] = []
+        print(f"  {YELLOW}{line}{RESET}")
+        return "log_dump"
+
+    # BLE log dump entry: "[  2.0s] WARMING  ADC= 820  LVL=  0%"
+    if log_dump_state["active"] and line.startswith("[") and "ADC=" in line:
+        try:
+            # Parse "[  xx.xs] STATE    ADC=xxxx  LVL=xxx%"
+            ts_str = line[1:].split("s]")[0].strip()
+            rest = line.split("]")[1]
+            state_str = rest.split("ADC=")[0].strip()
+            adc_str = rest.split("ADC=")[1].split("LVL=")[0].strip()
+            lvl_str = rest.split("LVL=")[1].rstrip("%").strip()
+            entry = {
+                "ts_s": float(ts_str),
+                "state": state_str,
+                "adc": int(adc_str),
+                "level": int(lvl_str),
+            }
+            log_dump_state["buffer"].append(entry)
+        except (ValueError, IndexError):
+            pass
+        return None
 
     if line.startswith("LOG,"):
         parts = line.split(",")
@@ -79,10 +123,11 @@ def parse_serial_line(line: str, log_buffer: list[dict], current: dict) -> str |
                 "adc": int(parts[3]),
                 "level": int(parts[4].rstrip("%")),
             }
-            log_buffer.append(entry)
-            while len(log_buffer) > MAX_LOG_ENTRIES:
-                log_buffer.pop(0)
-        print(f"  {GREEN}{format_log_entry(log_buffer[-1])}{RESET}")
+            if not log_dump_state["active"]:
+                log_buffer.append(entry)
+                while len(log_buffer) > MAX_LOG_ENTRIES:
+                    log_buffer.pop(0)
+        print(f"  {GREEN}{format_log_entry(log_buffer[-1] if log_buffer else entry)}{RESET}")
 
     elif line.startswith("DATA,"):
         parts = line.split(",")
@@ -218,6 +263,32 @@ def handle_alert(client: OpenAI, model: str, alert_type: str,
     print(f"{GREY}└────────────────────────────────{RESET}\n")
 
 
+def handle_log_analysis(client: OpenAI, model: str, log_buffer: list[dict], current: dict):
+    """Call AI to analyze the complete log book after a BLE LOG command."""
+    context = build_context(log_buffer, current)
+    user_content = f"请分析以下酒精检测仪的完整事件日志，给出总体评估和建议：\n\n{context}"
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=True,
+            max_tokens=400,
+        )
+        for chunk in response:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                print(delta, end="", flush=True)
+        print()
+    except Exception as e:
+        print(f"{RED}[错误] API调用失败: {e}{RESET}")
+
+
 def main():
     args = parse_args()
 
@@ -232,9 +303,10 @@ def main():
     log_buffer: list[dict] = []
     current: dict = {}
     last_alert_state: str | None = None
+    log_dump_state: dict = {"active": False, "buffer": []}
     line_buf = ""
 
-    print("输入问题与AI对话，或使用 /help 查看本地命令\n")
+    print("输入问题与AI对话，发送 L 命令查看 log book 分析\n")
 
     try:
         while True:
@@ -254,10 +326,15 @@ def main():
                             idx = line_buf.index("\n")
                             line = line_buf[:idx]
                             line_buf = line_buf[idx + 1:]
-                            alert = parse_serial_line(line, log_buffer, current)
-                            if alert and current.get("state") != last_alert_state:
+                            signal = parse_serial_line(line, log_buffer, current, log_dump_state)
+                            if signal == "log_dump":
+                                print(f"\n{YELLOW}[Log Book 分析]{RESET}")
+                                print(f"{GREY}┌─ AI 分析 ─────────────────────{RESET}")
+                                handle_log_analysis(client, args.model, log_buffer, current)
+                                print(f"{GREY}└────────────────────────────────{RESET}\n")
+                            elif signal and current.get("state") != last_alert_state:
                                 last_alert_state = current.get("state")
-                                handle_alert(client, args.model, alert, log_buffer, current)
+                                handle_alert(client, args.model, signal, log_buffer, current)
 
                 elif src is sys.stdin:
                     user_input = sys.stdin.readline()
