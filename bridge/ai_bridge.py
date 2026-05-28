@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI Bridge: breathalyzer serial -> DeepSeek API for alerts and chat."""
+"""AI Bridge: 酒精检测仪 USB串口 -> DeepSeek API -> AI分析"""
 
 import argparse
 import os
@@ -11,15 +11,16 @@ from datetime import datetime
 import serial
 from openai import OpenAI
 
-MAX_LOG_ENTRIES = 32
+MAX_LOG_ENTRIES = 32  # log book 最大条目数，与固件一致
 
-# ---- terminal colors ----
+# 终端颜色
 RED = "\033[91m"
 YELLOW = "\033[93m"
 GREEN = "\033[92m"
 GREY = "\033[90m"
 RESET = "\033[0m"
 
+# AI 的角色设定，发给 DeepSeek 的 system prompt
 SYSTEM_PROMPT = """你是智能酒精检测仪的AI助手，能访问设备的实时数据和事件日志。
 用中文回答，简洁直接。可以解释酒精浓度和风险，给出安全建议。
 如果被问到能否开车，始终强调"不确定就不要开"。
@@ -27,10 +28,12 @@ SYSTEM_PROMPT = """你是智能酒精检测仪的AI助手，能访问设备的�
 
 
 def timestamp() -> str:
+    """当前时间戳，用于日志前缀"""
     return datetime.now().strftime("%H:%M:%S")
 
 
 def parse_args():
+    """命令行参数：串口、波特率、模型名"""
     p = argparse.ArgumentParser(description="AI Bridge for Smart Breathalyzer")
     p.add_argument("port", nargs="?", default=None,
                    help="Serial port (e.g. /dev/tty.usbmodem*, COM3). Auto-detect if omitted.")
@@ -40,6 +43,7 @@ def parse_args():
 
 
 def find_port() -> str | None:
+    """自动查找 NUCLEO 串口设备"""
     import glob
     candidates = (glob.glob("/dev/tty.usbmodem*") + glob.glob("/dev/tty.usbserial*") +
                   glob.glob("/dev/tty.wchusbserial*") + glob.glob("/dev/tty.SLAB_USBtoUART*"))
@@ -47,6 +51,7 @@ def find_port() -> str | None:
 
 
 def connect_serial(port: str | None, baud: int) -> serial.Serial:
+    """打开串口，通过 DTR 复位 NUCLEO，排空启动信息"""
     if port is None:
         port = find_port()
         if port is None:
@@ -54,31 +59,30 @@ def connect_serial(port: str | None, baud: int) -> serial.Serial:
             sys.exit(1)
         print(f"[自动检测] 找到设备: {port}")
     ser = serial.Serial(port, baud, timeout=0.1)
-    # Reset NUCLEO board via DTR
+    # DTR 拉低→拉高→拉低 触发 NUCLEO 复位
     ser.dtr = False
     time.sleep(0.1)
     ser.dtr = True
     time.sleep(0.1)
     ser.dtr = False
-    time.sleep(1.5)
-    # Drain boot messages
-    ser.read(8192)
+    time.sleep(1.5)       # 等待设备启动
+    ser.read(8192)        # 排空启动时打印的 header 信息
     print(f"[{timestamp()}] 设备已连接: {port} @ {baud} baud")
     return ser
 
 
 def format_log_entry(e: dict) -> str:
+    """格式化一条 log 条目为对齐字符串"""
     return f"[{e['ts_s']:6.1f}s] {e['state']:<8} ADC={e['adc']:>4}  LVL={e['level']:>3}%"
 
 
 def parse_serial_line(line: str, log_buffer: list[dict], current: dict,
                       log_dump_state: dict) -> str | None:
-    """Parse one line from serial.
-
-    Returns:
-      'danger' / 'warning' — auto-alert from STATE= transition
-      'log_dump'           — device finished dumping log book (L command response)
-      None                 — no action needed
+    """解析串口收到的每一行，更新 log_buffer 和 current 状态。
+    返回值:
+      'danger' / 'warning' — 状态变化触发自动预警
+      'log_dump'           — BLE LOG 命令的 log book 输出完毕
+      None                 — 无需处理
     """
     line = line.strip()
     if not line:
@@ -86,27 +90,29 @@ def parse_serial_line(line: str, log_buffer: list[dict], current: dict,
 
     alert = None
 
-    # BLE log dump: "--- LOG BOOK (5/32 entries) ---"
+    # --- 检测 BLE LOG 命令的 log dump 开始 ---
+    # 格式: "--- LOG BOOK (5/32 entries) ---"
     if line.startswith("--- LOG BOOK"):
         log_dump_state["active"] = True
-        log_dump_state["buffer"] = []  # temporary buffer for this dump
+        log_dump_state["buffer"] = []  # 临时缓冲，dump 结束后再写入 log_buffer
         print(f"  {YELLOW}{line}{RESET}")
         return None
 
-    # BLE log dump: "--- END LOG ---"
+    # --- 检测 BLE LOG 命令的 log dump 结束 ---
+    # 格式: "--- END LOG ---"
     if line.startswith("--- END LOG"):
         log_dump_state["active"] = False
         if log_dump_state["buffer"]:
-            log_buffer.clear()
+            log_buffer.clear()                          # 用 BLE 返回的完整 log 替换本地缓存
             log_buffer.extend(log_dump_state["buffer"])
             log_dump_state["buffer"] = []
         print(f"  {YELLOW}{line}{RESET}")
-        return "log_dump"
+        return "log_dump"  # 触发 AI 分析
 
-    # BLE log dump entry: "[  2.0s] WARMING  ADC= 820  LVL=  0%"
+    # --- 解析 BLE log dump 中的条目 ---
+    # 格式: "[  30.0 s] SAFE  ADC= 373  LVL=  0%"
     if log_dump_state["active"] and line.startswith("[") and "ADC=" in line:
         try:
-            # Parse "[  xx.xs] STATE    ADC=xxxx  LVL=xxx%"
             ts_str = line[1:].split("s]")[0].strip()
             rest = line.split("]")[1]
             state_str = rest.split("ADC=")[0].strip()
@@ -120,9 +126,11 @@ def parse_serial_line(line: str, log_buffer: list[dict], current: dict,
             }
             log_dump_state["buffer"].append(entry)
         except (ValueError, IndexError):
-            pass
+            pass  # 解析失败则忽略该行
         return None
 
+    # --- 固件 printf 输出的 LOG, 行 ---
+    # 格式: "LOG,2000,WARMING,820,0%"
     if line.startswith("LOG,"):
         parts = line.split(",")
         if len(parts) >= 5:
@@ -133,11 +141,12 @@ def parse_serial_line(line: str, log_buffer: list[dict], current: dict,
                 "level": int(parts[4].rstrip("%")),
             }
             if not log_dump_state["active"]:
-                log_buffer.append(entry)
+                log_buffer.append(entry)               # 实时追加
                 while len(log_buffer) > MAX_LOG_ENTRIES:
-                    log_buffer.pop(0)
+                    log_buffer.pop(0)                  # FIFO 滚动
         print(f"  {GREEN}{format_log_entry(log_buffer[-1] if log_buffer else entry)}{RESET}")
 
+    # --- 固件 printf 输出的 DATA, 行（传感器采样数据） ---
     elif line.startswith("DATA,"):
         parts = line.split(",")
         if len(parts) >= 5:
@@ -147,6 +156,7 @@ def parse_serial_line(line: str, log_buffer: list[dict], current: dict,
             current["ts_ms"] = int(parts[1])
         print(f"  {GREY}ADC={current.get('filtered_adc','?')} {current.get('state','?')}{RESET}")
 
+    # --- 固件 BLE 遥测输出的 STATE= 行 ---
     elif line.startswith("STATE="):
         parts = line.split(",")
         for p in parts:
@@ -154,6 +164,7 @@ def parse_serial_line(line: str, log_buffer: list[dict], current: dict,
             if k == "STATE":
                 old_state = current.get("state")
                 current["state"] = v.strip()
+                # 状态首次变为 DANGER 或 WARNING 时触发预警
                 if old_state != current["state"] and current["state"] == "DANGER":
                     alert = "danger"
                 elif old_state != current["state"] and current["state"] == "WARNING":
@@ -171,6 +182,7 @@ def parse_serial_line(line: str, log_buffer: list[dict], current: dict,
 
 
 def build_context(log_buffer: list[dict], current: dict) -> str:
+    """把 log book + 当前状态拼接成发给 AI 的上下文文本"""
     lines = ["--- 事件日志 ---"]
     if log_buffer:
         for e in log_buffer:
@@ -185,6 +197,11 @@ def build_context(log_buffer: list[dict], current: dict) -> str:
 
 def call_ai(client: OpenAI, model: str, log_buffer: list[dict], current: dict,
             user_message: str | None = None, stream: bool = True) -> str:
+    """调用 DeepSeek API。
+    user_message=None  → 自动预警模式
+    user_message=文本  → 用户手动对话模式
+    默认流式输出，逐字打印到终端
+    """
     context = build_context(log_buffer, current)
 
     if user_message is None:
@@ -209,7 +226,7 @@ def call_ai(client: OpenAI, model: str, log_buffer: list[dict], current: dict,
             for chunk in response:
                 delta = chunk.choices[0].delta.content
                 if delta:
-                    print(delta, end="", flush=True)
+                    print(delta, end="", flush=True)  # 逐字流式打印
                     full += delta
             print()
             return full
@@ -224,7 +241,7 @@ def call_ai(client: OpenAI, model: str, log_buffer: list[dict], current: dict,
 
 
 def handle_local_command(cmd: str, log_buffer: list[dict], current: dict) -> bool:
-    """Handle /commands. Returns True if should quit."""
+    """处理 / 开头的本地命令，返回 True 表示退出程序"""
     cmd = cmd.strip()
 
     if cmd in ("/quit", "/q"):
@@ -261,6 +278,7 @@ def handle_local_command(cmd: str, log_buffer: list[dict], current: dict) -> boo
 
 def handle_alert(client: OpenAI, model: str, alert_type: str,
                  log_buffer: list[dict], current: dict):
+    """自动预警：Danger/Warning 状态变化时自动调用 AI"""
     if alert_type == "danger":
         prefix = f"{RED}[! 危险预警]{RESET}"
     else:
@@ -273,7 +291,7 @@ def handle_alert(client: OpenAI, model: str, alert_type: str,
 
 
 def handle_log_analysis(client: OpenAI, model: str, log_buffer: list[dict], current: dict):
-    """Call AI to analyze the complete log book after a BLE LOG command."""
+    """BLE LOG 命令触发的完整 log book AI 分析"""
     context = build_context(log_buffer, current)
     user_content = f"请分析以下酒精检测仪的完整事件日志，给出总体评估和建议：\n\n{context}"
 
@@ -299,49 +317,55 @@ def handle_log_analysis(client: OpenAI, model: str, log_buffer: list[dict], curr
 
 
 def main():
+    """主循环：同时监听串口数据和键盘输入"""
     args = parse_args()
 
+    # API key：优先用环境变量，否则用内置 key
     api_key = os.environ.get("DEEPSEEK_API_KEY") or "sk-cfbf6f9bce2e4f95a13e299a411832bc"
 
     ser = connect_serial(args.port, args.baud)
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
-    log_buffer: list[dict] = []
-    current: dict = {}
-    last_alert_state: str | None = None
-    log_dump_state: dict = {"active": False, "buffer": []}
-    line_buf = ""
+    log_buffer: list[dict] = []                      # 本地 log book 缓存（最多 32 条）
+    current: dict = {}                                # 当前传感器状态
+    last_alert_state: str | None = None               # 上次触发预警的状态，防重复
+    log_dump_state: dict = {"active": False, "buffer": []}  # BLE log dump 临时状态
+    line_buf = ""                                     # 串口行缓冲区
 
     print("输入问题与AI对话，发送 L 命令查看 log book 分析\n")
 
     try:
         while True:
-            # Read serial (direct read avoids macOS in_waiting issues)
+            # ---- 串口读取 ----
+            # macOS 上 in_waiting 不可靠，直接 read(4096) + timeout=0.1 轮询
             try:
                 data = ser.read(4096)
                 if data:
-                        line_buf += data.decode("utf-8", errors="replace")
-                        while "\n" in line_buf:
-                            idx = line_buf.index("\n")
-                            line = line_buf[:idx]
-                            line_buf = line_buf[idx + 1:]
-                            signal = parse_serial_line(line, log_buffer, current, log_dump_state)
-                            if signal == "log_dump":
-                                print(f"\n{YELLOW}[Log Book 分析]{RESET}")
-                                print(f"{GREY}┌─ AI 分析 ─────────────────────{RESET}")
-                                handle_log_analysis(client, args.model, log_buffer, current)
-                                print(f"{GREY}└────────────────────────────────{RESET}\n")
-                            elif signal and current.get("state") != last_alert_state:
-                                last_alert_state = current.get("state")
-                                handle_alert(client, args.model, signal, log_buffer, current)
+                    line_buf += data.decode("utf-8", errors="replace")
+                    while "\n" in line_buf:
+                        idx = line_buf.index("\n")
+                        line = line_buf[:idx]
+                        line_buf = line_buf[idx + 1:]
+                        signal = parse_serial_line(line, log_buffer, current, log_dump_state)
+                        if signal == "log_dump":
+                            # BLE log dump 完成 → AI 分析
+                            print(f"\n{YELLOW}[Log Book 分析]{RESET}")
+                            print(f"{GREY}┌─ AI 分析 ─────────────────────{RESET}")
+                            handle_log_analysis(client, args.model, log_buffer, current)
+                            print(f"{GREY}└────────────────────────────────{RESET}\n")
+                        elif signal and current.get("state") != last_alert_state:
+                            # Danger/Warning 首次出现 → 自动预警
+                            last_alert_state = current.get("state")
+                            handle_alert(client, args.model, signal, log_buffer, current)
                 else:
-                    time.sleep(0.05)
+                    time.sleep(0.05)  # 无数据时短暂休眠，降低 CPU
             except Exception as e:
                 print(f"{RED}[错误] 串口读取失败: {e}{RESET}")
                 time.sleep(2)
                 continue
 
-            # Check stdin (non-blocking)
+            # ---- 键盘输入 ----
+            # select 非阻塞检查 stdin 是否有用户输入
             rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
             if rlist:
                 user_input = sys.stdin.readline()
@@ -351,9 +375,11 @@ def main():
                 if not user_input:
                     continue
                 if user_input.startswith("/"):
+                    # / 开头 → 本地命令
                     if handle_local_command(user_input, log_buffer, current):
                         return
                 else:
+                    # 其他文本 → 发给 AI 对话
                     print(f"{GREY}┌─ AI 回复 ─────────────────────{RESET}")
                     call_ai(client, args.model, log_buffer, current, user_input)
                     print(f"{GREY}└────────────────────────────────{RESET}\n")
