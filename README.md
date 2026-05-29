@@ -9,6 +9,7 @@ A real-time embedded alcohol detection system that acquires signals from an MQ-3
 ```
 MQ-3 Sensor (AO) → 12-bit ADC → Trimmed-Mean Filter → Baseline Calibration
     → 7-State FSM (with hysteresis) → OLED + LED + Buzzer + BLE → Phone
+                                     → USB Serial → AI Bridge → DeepSeek API
 ```
 
 ---
@@ -66,8 +67,15 @@ src/
 ├── config.h          # Pin definitions, timing constants, tunable thresholds
 ├── filter.h          # MovingTrimmedAverage — circular buffer, window = 25
 ├── outputs.h         # SystemState enum, LED/buzzer pattern generator
-├── display.h         # OLED rendering + BLE telemetry frame formatting
-└── oled_driver.h     # SSD1306 I2C driver, framebuffer, 5×8 font
+├── display.h         # OLED rendering logic
+├── oled_driver.h     # SSD1306 I2C driver, framebuffer, 5×8 font
+└── ble_handler.h     # BLE UART I/O, command buffering, telemetry/log formatting
+
+bridge/
+├── ai_bridge.py      # USB serial → DeepSeek API: real-time AI alerts and chat
+├── simulator.py      # Offline serial simulator for testing without hardware
+├── test_ai.py        # End-to-end API integration test
+└── requirements.txt  # pyserial, openai
 ```
 
 ### Finite-State Machine (7 states)
@@ -86,7 +94,7 @@ State transitions use consecutive-sample counters for both entry and release, pl
 
 ### BLE Telemetry
 
-Every 2 seconds, the system transmits a status frame over UART at 9600 baud:
+The system transmits a status frame on every state transition over UART at 9600 baud (event-driven, rather than periodic):
 
 ```
 STATE=SAFE,RAW=912,AVG=908,BASE=900,W=1150,D=2400,LVL=3
@@ -145,6 +153,43 @@ Send `L` or `LOG` via BLE to retrieve the session's event log. Example output:
 ```
 
 This turns the BLE link from a passive data stream into an active, queryable session record — useful for reviewing exposure history without needing a companion app.
+
+### AI Bridge
+
+A Python script (`bridge/ai_bridge.py`) connects the device to the DeepSeek API over the same USB serial port used for debugging:
+
+```
+Terminal
+┌─────────────────────────────────────────┐
+│ 输入问题与AI对话，发送 L 命令查看 log    │
+│                                         │
+│ [12:34:56] LOG,30.0s,SAFE,ADC= 890...  │
+│ [! 危险预警] 正在分析...                  │
+│ ┌─ AI 分析 ─────────────────────        │
+│ 检测到危险酒精浓度(ADC=2432, 89%)，      │
+│ 建议立即停止操作设备，开窗通风...         │
+│ └────────────────────────────────────   │
+│ > 我现在能开车吗？                       │
+│ ┌─ AI 回复 ─────────────────────        │
+│ 绝对不能。当前读数远超安全范围...         │
+│ └────────────────────────────────────   │
+└─────────────────────────────────────────┘
+```
+
+**Features:**
+- **Auto-alert**: Danger or Warning state change automatically triggers an AI safety analysis
+- **Interactive chat**: Type natural-language questions; the AI sees current device data and event history
+- **BLE log-dump detection**: Sending `L` over BLE triggers a full log-book AI analysis
+- **Local commands**: `/log`, `/status`, `/clear`, `/help`, `/quit`
+
+**Setup:**
+```bash
+cd bridge/
+pip install -r requirements.txt
+export DEEPSEEK_API_KEY="your-key"
+python ai_bridge.py          # auto-detects serial port
+python ai_bridge.py /dev/tty.usbmodem*  # or specify port
+```
 
 ---
 
@@ -205,6 +250,7 @@ STATE => SAFE, raw=910 avg=907
 5. Remove the stimulus. System enters **Cooldown** — alternating red/green LEDs for 10 s.
 6. After cooldown, the system returns to Safe (or Warning, depending on residual signal).
 7. (Optional) Open a BLE serial app on your phone, connect to HM-10, and observe `STATE=...` telemetry frames. Send `W` to wake from Sleep, `C` to force recalibration.
+8. (Optional) Run `python bridge/ai_bridge.py` to see real-time AI safety analysis and interact with the device through natural language.
 
 ---
 
