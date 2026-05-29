@@ -202,7 +202,7 @@ def call_ai(client: OpenAI, model: str, log_buffer: list[dict], current: dict,
     user_message=文本  → 用户手动对话模式
     默认流式输出，逐字打印到终端
     """
-    context = build_context(log_buffer, current)
+    context = build_context(log_buffer, current)#处理上下文
 
     if user_message is None:
         user_content = f"检测到状态变化。请根据以下数据给出安全建议：\n\n{context}"

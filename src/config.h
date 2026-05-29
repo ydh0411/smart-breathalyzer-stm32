@@ -27,7 +27,7 @@ constexpr bool DATA_LOGGING          = false;
 constexpr int  ADC_MAX_VALUE        = 4095;
 constexpr auto SAMPLE_PERIOD        = 100ms;
 constexpr auto DISPLAY_PERIOD       = 250ms;
-constexpr auto BLE_TELEMETRY_PERIOD = 2s;
+constexpr auto BLE_TELEMETRY_PERIOD = 5s;
 constexpr auto PREHEAT_TIME         = 30s;
 constexpr auto COOLDOWN_TIME        = 10s;
 constexpr auto AUTO_SLEEP_AFTER     = 5min;
@@ -35,7 +35,7 @@ constexpr auto AUTO_SLEEP_AFTER     = 5min;
 // --- Digital filter ---
 constexpr int FILTER_WINDOW = 25;
 
-// --- State-transition debounce counters ---
+// --- State-transition debounce counters ---（状态转换去抖动计数器）
 constexpr int WARNING_ENTER_COUNT   = 2;
 constexpr int DANGER_ENTER_COUNT    = 2;
 constexpr int WARNING_RELEASE_COUNT = 2;
@@ -43,7 +43,7 @@ constexpr int DANGER_RELEASE_COUNT  = 3;
 constexpr int SLEEP_WAKE_OFFSET     = 120;
 constexpr int SLEEP_WAKE_COUNT      = 3;
 
-// --- Thresholds & hysteresis ---
+// --- Thresholds & hysteresis ---（阈值和迟滞）
 constexpr int WARNING_THRESHOLD_MIN = 850;
 constexpr int WARNING_OFFSET        = 250;
 constexpr int DANGER_OFFSET         = 1500;

@@ -1,4 +1,5 @@
 // Handwritten SSD1306 OLED driver over I2C — 128x64, framebuffer, 5x8 font
+//这是一个手写的SSD1306 OLED驱动程序，使用I2C通信协议，支持128x64分辨率，采用帧缓冲和5x8点阵字体
 #ifndef OLED_DRIVER_H
 #define OLED_DRIVER_H
 
@@ -10,7 +11,7 @@
 constexpr int OLED_ADDR_8BIT   = 0x78;
 constexpr int OLED_WIDTH       = 128;
 constexpr int OLED_HEIGHT      = 64;
-constexpr int OLED_BUFFER_SIZE = (OLED_WIDTH * OLED_HEIGHT) / 8;
+constexpr int OLED_BUFFER_SIZE = (OLED_WIDTH * OLED_HEIGHT) / 8;//一个page是8行，所以总字节数是宽度乘以高度除以8
 
 int clamp_int(const int value, const int lo, const int hi) {
     if (value < lo) return lo;
@@ -68,7 +69,7 @@ public:
     }
 
     // ---- Drawing primitives ----
-    void draw_text(int x, int y, const char *text) {
+    void draw_text(int x, int y, const char *text) {//写文本
         if (text == nullptr) return;
         while (*text != '\0' && x <= (OLED_WIDTH - 6)) {
             draw_char(x, y, *text);
@@ -77,7 +78,7 @@ public:
         }
     }
 
-    void draw_progress_bar(int x, int y, int width, int height, int percent) {
+    void draw_progress_bar(int x, int y, int width, int height, int percent) {//进度条
         percent = clamp_int(percent, 0, 100);
         if (width < 4 || height < 4) return;
 
@@ -106,14 +107,14 @@ private:
             && write_command(0x22) && write_command(0x00) && write_command(0x07);
     }
 
-    bool write_command(const uint8_t command) {
+    bool write_command(const uint8_t command) {//发送命令
         char packet[2];
         packet[0] = 0x00;
         packet[1] = static_cast<char>(command);
         return i2c_.write(OLED_ADDR_8BIT, packet, 2) == 0;
     }
 
-    void draw_char(const int x, const int y, const char c) {
+    void draw_char(const int x, const int y, const char c) {//写字符
         const uint8_t *glyph = glyph_for(c);
         for (int col = 0; col < 5; ++col) {
             const uint8_t bits = glyph[col];
@@ -125,7 +126,7 @@ private:
             draw_pixel(x + 5, y + row, false);
     }
 
-    void draw_pixel(const int x, const int y, const bool on) {
+    void draw_pixel(const int x, const int y, const bool on) {//绘制单个像素
         if (x < 0 || x >= OLED_WIDTH || y < 0 || y >= OLED_HEIGHT) return;
         const int page = y / 8;
         const int bit  = y % 8;

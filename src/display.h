@@ -1,4 +1,5 @@
 // High-level OLED display logic — renders system status, readings, and progress bar
+//这是具体的显示逻辑，负责将系统状态、传感器读数和进度条等信息渲染到OLED屏幕上
 #ifndef DISPLAY_H
 #define DISPLAY_H
 
@@ -6,7 +7,7 @@
 #include "oled_driver.h"
 #include "outputs.h"
 #include <cstdio>
-
+//整体布局设计
 static void update_display(Ssd1306 &oled, const SystemState state, const int raw, const int filtered,
                            const int baseline, const int warning_threshold, const int danger_threshold,
                            const int level_percent, const int seconds_left, const int cooldown_left) {
@@ -20,7 +21,7 @@ static void update_display(Ssd1306 &oled, const SystemState state, const int raw
     oled.draw_text(0, 16, line);
 
     // Level percentage + visual progress bar
-    std::snprintf(line, sizeof(line), "LVL:%3d%%", clamp_int(level_percent, 0, 100));
+    std::snprintf(line, sizeof(line), "LVL:%3d%%", clamp_int(level_percent, 0, 100));//进度条百分比
     oled.draw_text(0, 26, line);
     oled.draw_progress_bar(42, 26, 84, 10, level_percent);
 

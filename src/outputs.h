@@ -10,7 +10,7 @@ static void write_channel(DigitalOut &channel, const bool on, const bool active_
 }
 
 enum class SystemState {
-    Preheating, Safe, Warning, Danger, Cooldown, Sleep, SensorFault,
+    Preheating, Safe, Warning, Danger, Cooldown, Sleep, SensorFault,//一共7个状态
 };
 
 static const char *state_name(const SystemState state) {

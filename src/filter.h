@@ -14,7 +14,8 @@ public:
         if (count_ < FILTER_WINDOW) ++count_;
     }
 
-    int value() const {
+    int value() const {//滤波算法核心逻辑：计算当前缓冲区内的样本总和、最小值和最大值，并根据样本数量决定是否进行修剪平均计算，返回最终的滤波结果
+        //时间复杂度和空间复杂度都是O(N）
         if (count_ == 0) return 0;
 
         int sum = 0, min_value = INT_MAX, max_value = INT_MIN;
